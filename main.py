@@ -11,6 +11,8 @@ GROQ_API_KEY       = os.environ["GROQ_API_KEY"]
 GEMINI_API_KEY     = os.environ["GEMINI_API_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
+WORKER_URL         = os.environ["WORKER_URL"]
+WORKER_SECRET      = os.environ["WORKER_SECRET"]
 MAX_VIDEOS         = int(os.environ.get("MAX_VIDEOS", "3"))
 
 # ─── INIT ──────────────────────────────────────────────────────────────────────
@@ -79,7 +81,7 @@ def fetch_trending(count=20):
         return videos
 
     except Exception as e:
-        print(f"Bilibili API failed: {e} — trying yt-dlp fallback...")
+        print(f"Bilibili API failed: {e} — trying fallback...")
         return fetch_trending_fallback()
 
 def fetch_trending_fallback():
@@ -112,26 +114,65 @@ def pick_new(trending, already_done, max_count):
     print(f"Picked {len(picked)} new video(s)")
     return picked
 
-# ─── STEP 3: DOWNLOAD ──────────────────────────────────────────────────────────
-def download_video(url, index):
-    print(f"Downloading: {url}")
+# ─── STEP 3: DOWNLOAD VIA CLOUDFLARE WORKER ────────────────────────────────────
+def download_video(bvid, index):
+    print(f"Calling Cloudflare Worker for {bvid}...")
+
+    # Ask Worker for video info
+    resp = requests.get(
+        WORKER_URL,
+        params={"bvid": bvid, "secret": WORKER_SECRET},
+        timeout=30
+    )
+    data = resp.json()
+
+    if "error" in data:
+        print(f"Worker error: {data['error']}")
+        return None
+
+    page_url     = data.get("page_url")
+    download_url = data.get("download_url")
+    title        = data.get("title", "")
+
+    print(f"Title: {title}")
     out = str(WORK_DIR / f"video_{index}.%(ext)s")
+
+    # Try direct download URL first (fastest)
+    if download_url:
+        print("Trying direct download URL...")
+        dl_result = subprocess.run([
+            "ffmpeg", "-y",
+            "-headers", f"Referer: https://www.bilibili.com/video/{bvid}\r\n",
+            "-i", download_url,
+            "-c", "copy",
+            str(WORK_DIR / f"video_{index}.mp4")
+        ], capture_output=True, text=True)
+
+        mp4 = WORK_DIR / f"video_{index}.mp4"
+        if dl_result.returncode == 0 and mp4.exists() and mp4.stat().st_size > 100000:
+            print(f"Direct download success! ({mp4.stat().st_size/1024/1024:.1f} MB)")
+            return mp4, title
+
+    # Fallback: yt-dlp with page URL
+    print("Falling back to yt-dlp...")
     result = subprocess.run([
         "yt-dlp", "--no-playlist",
         "-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best",
         "--merge-output-format", "mp4",
         "--max-filesize", "150m",
-        "-o", out, url
+        "-o", out,
+        page_url
     ], capture_output=True, text=True)
 
     if result.returncode != 0:
-        print(f"Download failed:\n{result.stderr[-400:]}")
+        print(f"yt-dlp failed: {result.stderr[-400:]}")
         return None
 
     for f in WORK_DIR.glob(f"video_{index}.*"):
         if f.suffix == ".mp4":
             print(f"Downloaded ({f.stat().st_size/1024/1024:.1f} MB)")
-            return f
+            return f, title
+
     return None
 
 # ─── STEP 4: EXTRACT AUDIO ─────────────────────────────────────────────────────
@@ -169,7 +210,7 @@ def translate(segments, title=""):
     print("Translating to Hinglish with Gemini...")
     lines = [f"{i+1}. {s['text'].strip()}" for i, s in enumerate(segments)]
 
-    prompt = f"""You are a funny Indian content creator dubbing Chinese videos for Instagram Reels and YouTube Shorts.
+    prompt = f"""You are a funny Indian content creator dubbing Chinese videos for YouTube Shorts.
 
 Video title: {title}
 
@@ -180,7 +221,8 @@ Rules:
 - Naturally use: bhai, arre yaar, bro, kya kar raha hai, matlab, accha, seedha, ekdum, bas kar, dekh, sun, sach mein
 - Add humor where it fits naturally, do not force it
 - Keep the actual meaning intact
-- Return ONLY the numbered lines, no extra text or explanation
+- Keep subtitle lines SHORT — max 6 words per line so they fit on screen
+- Return ONLY the numbered lines, no extra text
 
 Chinese transcript:
 {chr(10).join(lines)}"""
@@ -216,39 +258,72 @@ def build_srt(segments, index):
     print("SRT created")
     return srt_path
 
-# ─── STEP 8: BURN SUBTITLES ────────────────────────────────────────────────────
-def burn_subtitles(video_path, srt_path, index):
+# ─── STEP 8: CONVERT TO REELS FORMAT + BURN SUBTITLES ─────────────────────────
+def convert_to_reels(video_path, srt_path, index):
+    """
+    Converts landscape video to 9:16 portrait (1080x1920) with blur background.
+    Then burns fancy yellow Hinglish subtitles.
+    YouTube Shorts & Instagram Reels ready!
+    """
     output_path = WORK_DIR / f"final_{index}.mp4"
-    print("Burning fancy subtitles...")
+    print("Converting to 9:16 Reels format with blur background...")
 
-    sub_filter = (
-        f"subtitles={srt_path}:force_style='"
+    # This ffmpeg command does everything in one pass:
+    # 1. Scale original video to fit width (1080px)
+    # 2. Create blurred version scaled to fill full 9:16 frame
+    # 3. Overlay original centered on blurred background
+    # 4. Burn fancy yellow subtitles at bottom
+    srt_abs = str(srt_path.resolve())
+
+    subtitle_style = (
         "FontName=Liberation Sans,"
-        "FontSize=20,"
-        "PrimaryColour=&H00FFFF00,"
-        "OutlineColour=&H00000000,"
-        "BackColour=&H80000000,"
+        "FontSize=18,"
+        "PrimaryColour=&H00FFFF00,"   # Yellow
+        "OutlineColour=&H00000000,"   # Black outline
+        "BackColour=&H80000000,"      # Semi-transparent bg
         "Bold=1,"
         "Outline=2,"
         "Shadow=1,"
-        "MarginV=35,"
-        "Alignment=2'"
+        "MarginV=60,"                 # Higher up from bottom (avoid phone UI)
+        "Alignment=2"                 # Bottom center
+    )
+
+    vf_filter = (
+        # Step 1: scale blurred background to fill 1080x1920
+        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,"
+        "boxblur=20:5[bg];"
+
+        # Step 2: scale original video to fit 1080 width
+        "[0:v]scale=1080:-2[fg];"
+
+        # Step 3: overlay original centered on blurred bg
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2,"
+
+        # Step 4: burn subtitles
+        f"subtitles={srt_abs}:force_style='{subtitle_style}'"
     )
 
     r = subprocess.run([
         "ffmpeg", "-y",
         "-i", str(video_path),
-        "-vf", sub_filter,
-        "-c:a", "copy",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-vf", vf_filter,
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "23",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        # YouTube Shorts: 1080x1920, under 60s ideally
+        "-t", "59",        # trim to 59s max for Shorts
         str(output_path)
     ], capture_output=True, text=True)
 
     if r.returncode != 0:
-        print(f"Subtitle burn failed:\n{r.stderr[-300:]}")
+        print(f"Reels conversion failed:\n{r.stderr[-400:]}")
         return None
 
-    print("Final video ready!")
+    size_mb = output_path.stat().st_size / 1024 / 1024
+    print(f"Reels video ready! ({size_mb:.1f} MB) — 9:16 portrait, ready for Shorts!")
     return output_path
 
 # ─── STEP 9: SEND TO TELEGRAM ──────────────────────────────────────────────────
@@ -270,11 +345,12 @@ def send_video(video_path, title, url):
         video_path = compressed
 
     caption = (
-        f"🎬 <b>New Video Ready!</b>\n\n"
+        f"🎬 <b>New Short Ready!</b>\n\n"
         f"📺 {title[:100]}\n\n"
-        f"✅ Hinglish subtitles burned in\n"
-        f"🔗 {url}\n"
-        f"📱 Save and post anywhere!"
+        f"✅ Hinglish subtitles\n"
+        f"📐 9:16 portrait (Shorts ready)\n"
+        f"🔗 {url}\n\n"
+        f"👆 Save and upload to YouTube Shorts!"
     )
 
     with open(video_path, "rb") as f:
@@ -292,7 +368,7 @@ def send_video(video_path, title, url):
 
 # ─── MAIN ──────────────────────────────────────────────────────────────────────
 def main():
-    notify("🤖 <b>Pipeline started!</b>\nFetching trending Chinese videos...")
+    notify("🤖 <b>Pipeline started!</b>\nFetching trending Chinese videos... 🔍")
 
     already_done = load_processed()
     trending     = fetch_trending(count=20)
@@ -316,10 +392,13 @@ def main():
         print(f"{'='*55}")
 
         try:
-            video_path = download_video(vid["url"], i)
-            if not video_path:
+            result = download_video(vid["bvid"], i)
+            if not result:
                 notify(f"⚠️ Video {i+1} download failed, skipping.")
                 continue
+
+            video_path, title = result
+            title = title or vid["title"]
 
             audio_path = extract_audio(video_path, i)
             if not audio_path:
@@ -330,14 +409,14 @@ def main():
                 notify(f"⚠️ Video {i+1} transcription empty, skipping.")
                 continue
 
-            translated = translate(segments, vid["title"])
-            srt_path   = build_srt(translated, i)
-            final      = burn_subtitles(video_path, srt_path, i)
+            translated  = translate(segments, title)
+            srt_path    = build_srt(translated, i)
+            final       = convert_to_reels(video_path, srt_path, i)
 
             if not final:
                 continue
 
-            send_video(final, vid["title"], vid["url"])
+            send_video(final, title, vid["url"])
             save_processed(vid["bvid"])
             success += 1
 
@@ -349,10 +428,9 @@ def main():
     notify(
         f"✅ <b>Pipeline done!</b>\n"
         f"📊 {success}/{len(to_process)} videos processed\n"
-        f"🎉 Check above for your videos, bhai!"
+        f"📱 Save from Telegram → Upload to YouTube Shorts!"
     )
     print("\nAll done!")
 
 if __name__ == "__main__":
     main()
-
