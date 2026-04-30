@@ -51,19 +51,14 @@ def to_srt_time(s):
     ms  = int((s - int(s)) * 1000)
     return f"{h:02}:{m:02}:{sec:02},{ms:03}"
 
-# ─── STEP 1: FETCH TRENDING ────────────────────────────────────────────────────
+# ─── STEP 1: FETCH TRENDING VIA WORKER ────────────────────────────────────────
 def fetch_trending(count=20):
-    print("Fetching trending Bilibili videos...")
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36",
-        "Referer":    "https://www.bilibili.com/",
-    }
+    print("Fetching trending via Cloudflare Worker...")
     try:
         resp = requests.get(
-            "https://api.bilibili.com/x/web-interface/popular",
-            params={"ps": count, "pn": 1},
-            headers=headers,
-            timeout=15
+            WORKER_URL,
+            params={"action": "trending", "count": count, "secret": WORKER_SECRET},
+            timeout=20
         )
         data = resp.json()
         if data.get("code") != 0:
@@ -77,34 +72,12 @@ def fetch_trending(count=20):
                 "views": item["stat"]["view"],
                 "url":   f"https://www.bilibili.com/video/{item['bvid']}"
             })
-        print(f"Got {len(videos)} trending videos")
+        print(f"Got {len(videos)} trending videos via Worker")
         return videos
 
     except Exception as e:
-        print(f"Bilibili API failed: {e} — trying fallback...")
-        return fetch_trending_fallback()
-
-def fetch_trending_fallback():
-    result = subprocess.run([
-        "yt-dlp", "--flat-playlist",
-        "--print", "%(id)s\t%(title)s",
-        "--playlist-end", "10",
-        "https://www.bilibili.com/v/popular/rank/all"
-    ], capture_output=True, text=True)
-
-    videos = []
-    for line in result.stdout.strip().splitlines():
-        parts = line.split("\t", 1)
-        if len(parts) == 2:
-            bvid, title = parts
-            videos.append({
-                "bvid":  bvid,
-                "title": title,
-                "views": 0,
-                "url":   f"https://www.bilibili.com/video/{bvid}"
-            })
-    print(f"Fallback got {len(videos)} videos")
-    return videos
+        print(f"Worker trending failed: {e}")
+        return []
 
 # ─── STEP 2: PICK NEW VIDEOS ───────────────────────────────────────────────────
 def pick_new(trending, already_done, max_count):
@@ -114,11 +87,10 @@ def pick_new(trending, already_done, max_count):
     print(f"Picked {len(picked)} new video(s)")
     return picked
 
-# ─── STEP 3: DOWNLOAD VIA CLOUDFLARE WORKER ────────────────────────────────────
+# ─── STEP 3: DOWNLOAD VIA WORKER ───────────────────────────────────────────────
 def download_video(bvid, index):
-    print(f"Calling Cloudflare Worker for {bvid}...")
+    print(f"Getting download URL via Worker for {bvid}...")
 
-    # Ask Worker for video info
     resp = requests.get(
         WORKER_URL,
         params={"bvid": bvid, "secret": WORKER_SECRET},
@@ -130,49 +102,57 @@ def download_video(bvid, index):
         print(f"Worker error: {data['error']}")
         return None
 
-    page_url     = data.get("page_url")
-    download_url = data.get("download_url")
     title        = data.get("title", "")
+    download_url = data.get("download_url")
+    page_url     = data.get("page_url", f"https://www.bilibili.com/video/{bvid}")
 
     print(f"Title: {title}")
-    out = str(WORK_DIR / f"video_{index}.%(ext)s")
+    output_path = WORK_DIR / f"video_{index}.mp4"
 
-    # Try direct download URL first (fastest)
+    # ── Try direct MP4 download URL from Worker ──────────────────────────────
     if download_url:
-        print("Trying direct download URL...")
-        dl_result = subprocess.run([
+        print("Downloading via direct URL...")
+        try:
+            r = requests.get(
+                download_url,
+                headers={
+                    "Referer":    f"https://www.bilibili.com/video/{bvid}",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                },
+                stream=True,
+                timeout=120
+            )
+            if r.status_code == 200:
+                with open(output_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                size_mb = output_path.stat().st_size / 1024 / 1024
+                if size_mb > 0.5:
+                    print(f"Direct download success! ({size_mb:.1f} MB)")
+                    return output_path, title
+                else:
+                    print(f"File too small ({size_mb:.1f} MB), trying fallback...")
+        except Exception as e:
+            print(f"Direct download failed: {e}")
+
+    # ── Fallback: ffmpeg with referer header ─────────────────────────────────
+    if download_url:
+        print("Trying ffmpeg download...")
+        r = subprocess.run([
             "ffmpeg", "-y",
-            "-headers", f"Referer: https://www.bilibili.com/video/{bvid}\r\n",
+            "-headers", f"Referer: https://www.bilibili.com/video/{bvid}\r\nUser-Agent: Mozilla/5.0\r\n",
             "-i", download_url,
             "-c", "copy",
-            str(WORK_DIR / f"video_{index}.mp4")
-        ], capture_output=True, text=True)
+            str(output_path)
+        ], capture_output=True, text=True, timeout=120)
 
-        mp4 = WORK_DIR / f"video_{index}.mp4"
-        if dl_result.returncode == 0 and mp4.exists() and mp4.stat().st_size > 100000:
-            print(f"Direct download success! ({mp4.stat().st_size/1024/1024:.1f} MB)")
-            return mp4, title
+        if r.returncode == 0 and output_path.exists():
+            size_mb = output_path.stat().st_size / 1024 / 1024
+            if size_mb > 0.5:
+                print(f"ffmpeg download success! ({size_mb:.1f} MB)")
+                return output_path, title
 
-    # Fallback: yt-dlp with page URL
-    print("Falling back to yt-dlp...")
-    result = subprocess.run([
-        "yt-dlp", "--no-playlist",
-        "-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best",
-        "--merge-output-format", "mp4",
-        "--max-filesize", "150m",
-        "-o", out,
-        page_url
-    ], capture_output=True, text=True)
-
-    if result.returncode != 0:
-        print(f"yt-dlp failed: {result.stderr[-400:]}")
-        return None
-
-    for f in WORK_DIR.glob(f"video_{index}.*"):
-        if f.suffix == ".mp4":
-            print(f"Downloaded ({f.stat().st_size/1024/1024:.1f} MB)")
-            return f, title
-
+    print("All download methods failed")
     return None
 
 # ─── STEP 4: EXTRACT AUDIO ─────────────────────────────────────────────────────
@@ -258,49 +238,32 @@ def build_srt(segments, index):
     print("SRT created")
     return srt_path
 
-# ─── STEP 8: CONVERT TO REELS FORMAT + BURN SUBTITLES ─────────────────────────
+# ─── STEP 8: CONVERT TO REELS + BURN SUBS ─────────────────────────────────────
 def convert_to_reels(video_path, srt_path, index):
-    """
-    Converts landscape video to 9:16 portrait (1080x1920) with blur background.
-    Then burns fancy yellow Hinglish subtitles.
-    YouTube Shorts & Instagram Reels ready!
-    """
     output_path = WORK_DIR / f"final_{index}.mp4"
-    print("Converting to 9:16 Reels format with blur background...")
+    print("Converting to 9:16 Reels with blur background...")
 
-    # This ffmpeg command does everything in one pass:
-    # 1. Scale original video to fit width (1080px)
-    # 2. Create blurred version scaled to fill full 9:16 frame
-    # 3. Overlay original centered on blurred background
-    # 4. Burn fancy yellow subtitles at bottom
     srt_abs = str(srt_path.resolve())
 
     subtitle_style = (
         "FontName=Liberation Sans,"
         "FontSize=18,"
-        "PrimaryColour=&H00FFFF00,"   # Yellow
-        "OutlineColour=&H00000000,"   # Black outline
-        "BackColour=&H80000000,"      # Semi-transparent bg
+        "PrimaryColour=&H00FFFF00,"
+        "OutlineColour=&H00000000,"
+        "BackColour=&H80000000,"
         "Bold=1,"
         "Outline=2,"
         "Shadow=1,"
-        "MarginV=60,"                 # Higher up from bottom (avoid phone UI)
-        "Alignment=2"                 # Bottom center
+        "MarginV=60,"
+        "Alignment=2"
     )
 
     vf_filter = (
-        # Step 1: scale blurred background to fill 1080x1920
         "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
         "crop=1080:1920,"
         "boxblur=20:5[bg];"
-
-        # Step 2: scale original video to fit 1080 width
         "[0:v]scale=1080:-2[fg];"
-
-        # Step 3: overlay original centered on blurred bg
         "[bg][fg]overlay=(W-w)/2:(H-h)/2,"
-
-        # Step 4: burn subtitles
         f"subtitles={srt_abs}:force_style='{subtitle_style}'"
     )
 
@@ -308,13 +271,9 @@ def convert_to_reels(video_path, srt_path, index):
         "ffmpeg", "-y",
         "-i", str(video_path),
         "-vf", vf_filter,
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "23",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        # YouTube Shorts: 1080x1920, under 60s ideally
-        "-t", "59",        # trim to 59s max for Shorts
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-c:a", "aac", "-b:a", "128k",
+        "-t", "59",
         str(output_path)
     ], capture_output=True, text=True)
 
@@ -322,8 +281,7 @@ def convert_to_reels(video_path, srt_path, index):
         print(f"Reels conversion failed:\n{r.stderr[-400:]}")
         return None
 
-    size_mb = output_path.stat().st_size / 1024 / 1024
-    print(f"Reels video ready! ({size_mb:.1f} MB) — 9:16 portrait, ready for Shorts!")
+    print(f"Reels ready! ({output_path.stat().st_size/1024/1024:.1f} MB)")
     return output_path
 
 # ─── STEP 9: SEND TO TELEGRAM ──────────────────────────────────────────────────
@@ -333,7 +291,7 @@ def send_video(video_path, title, url):
     print(f"Size: {size_mb:.1f} MB")
 
     if size_mb > 50:
-        print("Compressing for Telegram 50MB limit...")
+        print("Compressing for Telegram...")
         compressed = str(video_path).replace(".mp4", "_small.mp4")
         subprocess.run([
             "ffmpeg", "-y", "-i", str(video_path),
@@ -348,7 +306,7 @@ def send_video(video_path, title, url):
         f"🎬 <b>New Short Ready!</b>\n\n"
         f"📺 {title[:100]}\n\n"
         f"✅ Hinglish subtitles\n"
-        f"📐 9:16 portrait (Shorts ready)\n"
+        f"📐 9:16 portrait — Shorts ready!\n"
         f"🔗 {url}\n\n"
         f"👆 Save and upload to YouTube Shorts!"
     )
@@ -368,19 +326,19 @@ def send_video(video_path, title, url):
 
 # ─── MAIN ──────────────────────────────────────────────────────────────────────
 def main():
-    notify("🤖 <b>Pipeline started!</b>\nFetching trending Chinese videos... 🔍")
+    notify("🤖 <b>Pipeline started!</b>\nFetching trending via Cloudflare Worker... 🔍")
 
     already_done = load_processed()
     trending     = fetch_trending(count=20)
 
     if not trending:
-        notify("❌ Could not fetch any videos. Check GitHub Actions logs.")
+        notify("❌ Could not fetch trending. Check logs.")
         return
 
     to_process = pick_new(trending, already_done, MAX_VIDEOS)
 
     if not to_process:
-        notify("ℹ️ No new videos today — all trending already processed!")
+        notify("ℹ️ No new videos — all trending already processed!")
         return
 
     notify(f"🎯 Processing <b>{len(to_process)}</b> video(s)... sit back bhai! ☕")
@@ -409,9 +367,9 @@ def main():
                 notify(f"⚠️ Video {i+1} transcription empty, skipping.")
                 continue
 
-            translated  = translate(segments, title)
-            srt_path    = build_srt(translated, i)
-            final       = convert_to_reels(video_path, srt_path, i)
+            translated = translate(segments, title)
+            srt_path   = build_srt(translated, i)
+            final      = convert_to_reels(video_path, srt_path, i)
 
             if not final:
                 continue
