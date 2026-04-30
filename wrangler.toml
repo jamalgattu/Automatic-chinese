@@ -1,0 +1,3 @@
+name = "wandering-field-7d2a"
+main = "worker.js"
+compatibility_date = "2026-04-30"
