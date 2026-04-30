@@ -1,19 +1,14 @@
-// Cloudflare Worker — Bilibili URL Resolver
-// Fetches direct video info from Bilibili API using Cloudflare's trusted IPs
-
 export default {
   async fetch(request, env) {
 
-    // Only allow GET requests
     if (request.method !== "GET") {
       return new Response("Method not allowed", { status: 405 });
     }
 
     const url = new URL(request.url);
     const bvid = url.searchParams.get("bvid");
-
-    // Simple security — require a secret key so only your pipeline can use it
     const secret = url.searchParams.get("secret");
+
     if (secret !== env.SECRET_KEY) {
       return new Response("Unauthorized", { status: 401 });
     }
@@ -25,19 +20,34 @@ export default {
       });
     }
 
+    // Headers that trick Bilibili into thinking this is a real browser
+    const biliHeaders = {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Referer": `https://www.bilibili.com/video/${bvid}`,
+      "Origin": "https://www.bilibili.com",
+      "Accept": "application/json, text/plain, */*",
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+      "Cookie": "buvid3=random123; b_nut=1234567890; CURRENT_FNVAL=4048",
+    };
+
     try {
-      // Step 1: Get video info (cid) from bvid
+      // Step 1: Get video cid from bvid
       const infoResp = await fetch(
         `https://api.bilibili.com/x/web-interface/view?bvid=${bvid}`,
-        {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": "https://www.bilibili.com/",
-            "Origin": "https://www.bilibili.com"
-          }
-        }
+        { headers: biliHeaders }
       );
-      const infoData = await infoResp.json();
+
+      const infoText = await infoResp.text();
+
+      // Check if response is HTML (blocked)
+      if (infoText.trim().startsWith("<")) {
+        return new Response(JSON.stringify({
+          error: "Bilibili returned HTML — API blocked",
+          raw: infoText.substring(0, 200)
+        }), { status: 503, headers: { "Content-Type": "application/json" } });
+      }
+
+      const infoData = JSON.parse(infoText);
 
       if (infoData.code !== 0) {
         return new Response(JSON.stringify({
@@ -49,50 +59,68 @@ export default {
 
       const cid   = infoData.data.cid;
       const title = infoData.data.title;
-      const desc  = infoData.data.desc;
       const cover = infoData.data.pic;
 
-      // Step 2: Get playable stream URLs
+      // Step 2: Get playable stream URL
       const playResp = await fetch(
         `https://api.bilibili.com/x/player/playurl?bvid=${bvid}&cid=${cid}&qn=80&fnval=0&fnver=0&fourk=0`,
-        {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": "https://www.bilibili.com/video/${bvid}",
-            "Origin": "https://www.bilibili.com"
-          }
-        }
+        { headers: { ...biliHeaders, "Referer": `https://www.bilibili.com/video/${bvid}` } }
       );
-      const playData = await playResp.json();
+
+      const playText = await playResp.text();
+
+      if (playText.trim().startsWith("<")) {
+        // Fallback — return just the video page URL for yt-dlp to handle
+        return new Response(JSON.stringify({
+          bvid,
+          title,
+          cover,
+          cid,
+          download_url: null,
+          fallback: true,
+          page_url: `https://www.bilibili.com/video/${bvid}`
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+
+      const playData = JSON.parse(playText);
 
       if (playData.code !== 0) {
+        // Fallback to page URL
         return new Response(JSON.stringify({
-          error: "Playurl API error",
-          code: playData.code,
-          message: playData.message
-        }), { status: 500, headers: { "Content-Type": "application/json" } });
+          bvid,
+          title,
+          cover,
+          cid,
+          download_url: null,
+          fallback: true,
+          page_url: `https://www.bilibili.com/video/${bvid}`
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
       }
 
-      // Extract video URLs (pick best quality available)
-      const durl = playData.data.durl;
+      const durl = playData.data?.durl;
       if (!durl || durl.length === 0) {
-        return new Response(JSON.stringify({ error: "No download URLs found" }), {
-          status: 404,
-          headers: { "Content-Type": "application/json" }
-        });
+        return new Response(JSON.stringify({
+          bvid,
+          title,
+          cover,
+          cid,
+          download_url: null,
+          fallback: true,
+          page_url: `https://www.bilibili.com/video/${bvid}`
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
       }
 
-      // Return the best URL + metadata
       return new Response(JSON.stringify({
         bvid,
         title,
-        desc,
         cover,
         cid,
-        download_url: durl[0].url,
-        backup_urls:  durl[0].backup_url || [],
-        size:         durl[0].size,
-        duration:     playData.data.timelength
+        download_url:  durl[0].url,
+        backup_urls:   durl[0].backup_url || [],
+        size:          durl[0].size,
+        duration:      playData.data.timelength,
+        fallback:      false,
+        page_url:      `https://www.bilibili.com/video/${bvid}`
       }), {
         status: 200,
         headers: {
