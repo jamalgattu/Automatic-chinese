@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
-GITHUB_TOKEN       = os.environ["GITHUB_TOKEN"]
+GITHUB_TOKEN       = os.environ["GH_TOKEN"]
 GITHUB_REPO        = os.environ["GITHUB_REPO"]
 SPACE_URL          = os.environ.get("SPACE_URL", "")
 
