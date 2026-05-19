@@ -73,30 +73,58 @@ def extract_link(text: str) -> str:
 
 
 def get_download_url(url: str):
-    """
-    Extract direct video URL using yt-dlp
-    """
 
     try:
+
+        # STEP 1: Expand short Douyin link
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                "Version/16.0 Mobile/15E148 Safari/604.1"
+            )
+        }
+
+        response = requests.get(
+            url,
+            headers=headers,
+            allow_redirects=True,
+            timeout=15
+        )
+
+        expanded_url = response.url
+
+        logger.info(f"Expanded URL: {expanded_url}")
+
+        # STEP 2: Use yt-dlp on expanded URL
         ydl_opts = {
             "quiet": True,
             "noplaylist": True,
             "extract_flat": False,
-            "http_headers": {
-                "User-Agent": "Mozilla/5.0"
-            }
+            "http_headers": headers,
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
 
-            info = ydl.extract_info(url, download=False)
+            info = ydl.extract_info(
+                expanded_url,
+                download=False
+            )
 
-            title = info.get("title", "Chinese Video")
+            title = info.get(
+                "title",
+                "Chinese Video"
+            )
 
             video_url = info.get("url")
 
+            # fallback
             if not video_url:
-                formats = info.get("formats", [])
+
+                formats = info.get(
+                    "formats",
+                    []
+                )
 
                 for fmt in reversed(formats):
 
@@ -107,13 +135,11 @@ def get_download_url(url: str):
             if not video_url:
                 return None, None
 
-            logger.info(f"Title: {title}")
-            logger.info("Video URL extracted successfully")
-
             return video_url, title
 
     except Exception as e:
-        logger.error(f"yt-dlp error: {e}")
+
+        logger.error(f"Extraction error: {e}")
 
         return None, None
 
