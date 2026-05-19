@@ -2,14 +2,17 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir \
-    python-telegram-bot==20.7 \
+COPY . /app
+
+RUN pip install --upgrade pip
+
+RUN pip install \
     flask \
     requests \
+    python-telegram-bot \
+    yt-dlp \
     gunicorn
 
-COPY bot.py .
+EXPOSE 10000
 
-EXPOSE 7860
-
-CMD ["gunicorn", "--bind", "0.0.0.0:7860", "--workers", "1", "bot:flask_app"]
+CMD ["python", "bot.py"]
