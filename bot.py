@@ -23,7 +23,7 @@ SPACE_URL          = os.environ.get("SPACE_URL", "")
 flask_app = Flask(__name__)
 
 # ─── HELPERS ───────────────────────────────────────────────────────────────────
-def is_douyin_link(text: str) -> bool:
+def is_valid_link(text: str) -> bool:
     patterns = [
         r'https?://.*douyin\.com.*',
         r'https?://.*tiktok\.com.*',
@@ -36,31 +36,35 @@ def extract_link(text: str) -> str:
     match = re.search(r'https?://[^\s]+', text)
     return match.group(0) if match else text.strip()
 
-def get_download_url(douyin_url: str) -> str:
-    """Get watermark-free MP4 URL from douyin.wtf"""
+def get_download_url(url: str) -> tuple:
+    """
+    Get watermark-free video URL using tikwm.com
+    Returns (video_url, title) or (None, None)
+    """
     try:
-        resp = requests.get(
-            "https://api.douyin.wtf/api",
-            params={"url": douyin_url, "minimal": "false"},
+        resp = requests.post(
+            "https://www.tikwm.com/api/",
+            data={"url": url, "hd": 1},
+            headers={"User-Agent": "Mozilla/5.0"},
             timeout=20
         )
         data = resp.json()
-        logger.info(f"douyin.wtf response: {data}")
+        logger.info(f"tikwm response code: {data.get('code')}")
 
-        # Try different response fields
-        video_url = (
-            data.get("video_url") or
-            data.get("nwm_video_url") or
-            data.get("nwm_video_url_HQ") or
-            data.get("play_addr", {}).get("url_list", [None])[0]
-        )
-        return video_url
+        if data.get("code") == 0:
+            video_data = data.get("data", {})
+            video_url  = video_data.get("hdplay") or video_data.get("play")
+            title      = video_data.get("title", "Chinese Video")
+            return video_url, title
+
+        logger.error(f"tikwm error: {data.get('msg')}")
+        return None, None
+
     except Exception as e:
-        logger.error(f"douyin.wtf error: {e}")
-        return None
+        logger.error(f"tikwm exception: {e}")
+        return None, None
 
-def trigger_github(video_url: str) -> bool:
-    """Trigger GitHub Actions to process the video"""
+def trigger_github(video_url: str, title: str) -> bool:
     url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/process.yml/dispatches"
     resp = requests.post(
         url,
@@ -68,10 +72,16 @@ def trigger_github(video_url: str) -> bool:
             "Authorization": f"Bearer {GH_TOKEN}",
             "Accept": "application/vnd.github+json"
         },
-        json={"ref": "main", "inputs": {"video_url": video_url}},
+        json={
+            "ref": "main",
+            "inputs": {
+                "video_url": video_url,
+                "title": title
+            }
+        },
         timeout=15
     )
-    logger.info(f"GitHub trigger status: {resp.status_code}")
+    logger.info(f"GitHub trigger: {resp.status_code}")
     return resp.status_code == 204
 
 # ─── HANDLERS ──────────────────────────────────────────────────────────────────
@@ -92,7 +102,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text or ""
 
-    if not is_douyin_link(text):
+    if not is_valid_link(text):
         await update.message.reply_text(
             "❌ Send me a Douyin link!\n\n"
             "Example:\n`https://v.douyin.com/xxxxx`",
@@ -100,40 +110,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    msg = await update.message.reply_text("🔍 Got your link! Fetching video... ⏳")
+    msg = await update.message.reply_text("🔍 Fetching video info... ⏳")
 
     try:
         link = extract_link(text)
-        logger.info(f"Processing link: {link}")
+        logger.info(f"Processing: {link}")
 
-        # Get download URL
-        video_url = get_download_url(link)
+        await msg.edit_text("⬇️ Getting download URL... ⏳")
+        video_url, title = get_download_url(link)
 
         if not video_url:
             await msg.edit_text(
-                "❌ Could not get download URL!\n"
-                "Make sure the link is a valid public Douyin video."
+                "❌ Could not get download URL!\n\n"
+                "Try:\n"
+                "• Make sure video is public\n"
+                "• Copy the full share link from Douyin app\n"
+                "• Try again in a few seconds"
             )
             return
 
-        await msg.edit_text("🚀 Triggering processing pipeline... ⏳")
+        await msg.edit_text(f"🚀 Got it! Processing...\n\n📹 *{title[:50]}*", parse_mode="Markdown")
 
-        # Trigger GitHub Actions
-        success = trigger_github(video_url)
+        success = trigger_github(video_url, title)
 
         if success:
             await msg.edit_text(
                 "✅ *Processing started!*\n\n"
+                f"📹 {title[:60]}\n\n"
                 "⏱ Takes ~3-5 minutes\n"
-                "📱 I'll send your converted Short soon!\n\n"
+                "📱 Your Short is incoming!\n\n"
                 "Sit back bhai ☕",
                 parse_mode="Markdown"
             )
         else:
-            await msg.edit_text(
-                "❌ Failed to trigger processing!\n"
-                "Check GitHub Actions setup."
-            )
+            await msg.edit_text("❌ Failed to trigger processing! Check GitHub Actions.")
 
     except Exception as e:
         logger.error(f"Error: {e}")
@@ -175,4 +185,3 @@ def setup_webhook():
 if __name__ == "__main__":
     setup_webhook()
     flask_app.run(host="0.0.0.0", port=7860, debug=False)
-
