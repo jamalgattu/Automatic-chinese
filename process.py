@@ -2,12 +2,13 @@ import os
 import subprocess
 import requests
 import json
+import yt_dlp
 from pathlib import Path
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
-VIDEO_URL          = os.environ["VIDEO_URL"]
+SHARE_URL          = os.environ["SHARE_URL"]
 
 WORK_DIR = Path("workdir")
 WORK_DIR.mkdir(exist_ok=True)
@@ -23,13 +24,71 @@ def notify(msg):
     except Exception as e:
         print(f"Notify failed: {e}")
 
-# ─── STEP 1: DOWNLOAD VIDEO ────────────────────────────────────────────────────
-def download_video():
-    print(f"Downloading: {VIDEO_URL}")
+# ─── STEP 1: EXTRACT DIRECT VIDEO URL ─────────────────────────────────────────
+def extract_video_url(share_url: str):
+    print(f"Extracting URL from: {share_url}")
+
+    mobile_ua = (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+        "Version/16.0 Mobile/15E148 Safari/604.1"
+    )
+
+    # Expand short URL first
+    try:
+        r = requests.get(
+            share_url,
+            headers={"User-Agent": mobile_ua},
+            allow_redirects=True,
+            timeout=15
+        )
+        expanded_url = r.url
+        print(f"Expanded URL: {expanded_url}")
+    except Exception as e:
+        print(f"URL expansion failed, using original: {e}")
+        expanded_url = share_url
+
+    ydl_opts = {
+        "quiet": True,
+        "noplaylist": True,
+        "extract_flat": False,
+        "http_headers": {"User-Agent": mobile_ua},
+    }
+
+    urls_to_try = list(dict.fromkeys([expanded_url, share_url]))
+
+    for url in urls_to_try:
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                title = info.get("title", "Chinese Video")
+                video_url = info.get("url")
+
+                if not video_url:
+                    for fmt in reversed(info.get("formats", [])):
+                        if fmt.get("url"):
+                            video_url = fmt["url"]
+                            break
+
+                if video_url:
+                    print(f"Extracted URL successfully. Title: {title}")
+                    return video_url, title
+
+        except Exception as e:
+            print(f"yt-dlp failed for {url}: {e}")
+
+    raise Exception(
+        "Could not extract video URL.\n"
+        "Possible reasons: video is private, region-locked, or the link is invalid."
+    )
+
+# ─── STEP 2: DOWNLOAD VIDEO ────────────────────────────────────────────────────
+def download_video(video_url: str):
+    print(f"Downloading: {video_url}")
     output_path = WORK_DIR / "input.mp4"
 
     r = requests.get(
-        VIDEO_URL,
+        video_url,
         stream=True,
         timeout=120,
         headers={"User-Agent": "Mozilla/5.0"}
@@ -50,7 +109,7 @@ def download_video():
 
     return output_path
 
-# ─── STEP 2: CONVERT TO 9:16 BLUR BACKGROUND ──────────────────────────────────
+# ─── STEP 3: CONVERT TO 9:16 BLUR BACKGROUND ──────────────────────────────────
 def convert_to_reels(video_path):
     output_path = WORK_DIR / "final.mp4"
     print("Converting to 9:16 blur background...")
@@ -82,7 +141,7 @@ def convert_to_reels(video_path):
     print(f"Converted! ({size_mb:.1f} MB)")
     return output_path
 
-# ─── STEP 3: SEND TO TELEGRAM WITH BUTTONS ────────────────────────────────────
+# ─── STEP 4: SEND TO TELEGRAM WITH BUTTONS ────────────────────────────────────
 def send_to_telegram(video_path):
     print("Sending to Telegram...")
     size_mb = os.path.getsize(video_path) / 1024 / 1024
@@ -136,17 +195,18 @@ def send_to_telegram(video_path):
 
 # ─── MAIN ──────────────────────────────────────────────────────────────────────
 def main():
-    notify("⚙️ <b>Processing your video...</b>\nConverting to Reels format... ⏳")
+    notify("⚙️ <b>Processing your video...</b>\nExtracting and converting to Reels format... ⏳")
 
     try:
-        video_path = download_video()
+        video_url, title = extract_video_url(SHARE_URL)
+        notify(f"⬇️ Downloading: <b>{title[:70]}</b>")
+        video_path = download_video(video_url)
         final      = convert_to_reels(video_path)
         send_to_telegram(final)
 
     except Exception as e:
         print(f"Pipeline error: {e}")
-        notify(f"❌ Processing failed: {str(e)[:200]}")
+        notify(f"❌ Processing failed:\n{str(e)[:200]}")
 
 if __name__ == "__main__":
     main()
-

@@ -3,7 +3,6 @@ import logging
 import requests
 import re
 import asyncio
-import yt_dlp
 
 from flask import Flask, request as flask_request
 from telegram import Update
@@ -72,79 +71,7 @@ def extract_link(text: str) -> str:
     return text.strip()
 
 
-def get_download_url(url: str):
-
-    try:
-
-        # STEP 1: Expand short Douyin link
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
-                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                "Version/16.0 Mobile/15E148 Safari/604.1"
-            )
-        }
-
-        response = requests.get(
-            url,
-            headers=headers,
-            allow_redirects=True,
-            timeout=15
-        )
-
-        expanded_url = response.url
-
-        logger.info(f"Expanded URL: {expanded_url}")
-
-        # STEP 2: Use yt-dlp on expanded URL
-        ydl_opts = {
-            "quiet": True,
-            "noplaylist": True,
-            "extract_flat": False,
-            "http_headers": headers,
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-
-            info = ydl.extract_info(
-                expanded_url,
-                download=False
-            )
-
-            title = info.get(
-                "title",
-                "Chinese Video"
-            )
-
-            video_url = info.get("url")
-
-            # fallback
-            if not video_url:
-
-                formats = info.get(
-                    "formats",
-                    []
-                )
-
-                for fmt in reversed(formats):
-
-                    if fmt.get("url"):
-                        video_url = fmt["url"]
-                        break
-
-            if not video_url:
-                return None, None
-
-            return video_url, title
-
-    except Exception as e:
-
-        logger.error(f"Extraction error: {e}")
-
-        return None, None
-
-
-def trigger_github(video_url: str, title: str):
+def trigger_github(share_url: str):
 
     try:
 
@@ -162,8 +89,7 @@ def trigger_github(video_url: str, title: str):
             json={
                 "ref": "main",
                 "inputs": {
-                    "video_url": video_url,
-                    "title": title
+                    "share_url": share_url,
                 }
             },
             timeout=20
@@ -217,47 +143,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             return
 
-        msg = await update.message.reply_text(
-            "🔍 Reading video info..."
-        )
-
         link = extract_link(text)
 
         logger.info(f"Received link: {link}")
 
-        await msg.edit_text(
-            "⬇️ Extracting direct video URL..."
+        msg = await update.message.reply_text(
+            "🚀 Sending to processor..."
         )
 
-        video_url, title = get_download_url(link)
-
-        if not video_url:
-
-            await msg.edit_text(
-                "❌ Could not extract video.\n\n"
-                "Possible reasons:\n"
-                "• Video is private\n"
-                "• Douyin blocked extraction\n"
-                "• Invalid share link\n"
-                "• Temporary failure\n\n"
-                "Try another link."
-            )
-
-            return
-
-        await msg.edit_text(
-            f"🚀 Processing started!\n\n"
-            f"📹 {title[:70]}"
-        )
-
-        success = trigger_github(video_url, title)
+        success = trigger_github(link)
 
         if success:
 
             await msg.edit_text(
-                "✅ Processing started successfully!\n\n"
-                f"📹 {title[:70]}\n\n"
-                "⏱ Processing time: 2-5 mins"
+                "✅ Processing started!\n\n"
+                f"🔗 {link[:70]}\n\n"
+                "⏱ Extracting + processing: 2-5 mins\n"
+                "You'll receive the video when it's ready."
             )
 
         else:

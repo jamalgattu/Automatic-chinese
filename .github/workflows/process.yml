@@ -3,13 +3,9 @@ name: 🎬 Process Video
 on:
   workflow_dispatch:
     inputs:
-      video_url:
-        description: "Direct video download URL"
+      share_url:
+        description: "Douyin/TikTok share URL"
         required: true
-      title:
-        description: "Video title"
-        required: false
-        default: "Chinese Video"
 
 jobs:
   process:
@@ -34,12 +30,11 @@ jobs:
           ffmpeg -version
 
       - name: 📦 Install dependencies
-        run: pip install requests
+        run: pip install requests yt-dlp
 
       - name: 🚀 Process Video
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
-          VIDEO_URL:          ${{ inputs.video_url }}
-          VIDEO_TITLE:        ${{ inputs.title }}
+          SHARE_URL:          ${{ inputs.share_url }}
         run: python process.py
