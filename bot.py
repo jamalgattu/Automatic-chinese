@@ -15,26 +15,43 @@ from telegram.ext import (
     filters
 )
 
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # LOGGING
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────────────────────
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-GH_TOKEN = os.environ["GH_TOKEN"]
-GITHUB_REPO = os.environ["GITHUB_REPO"]
+# ─────────────────────────────────────────────
+# ENV VARIABLES
+# ─────────────────────────────────────────────
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+GH_TOKEN = os.environ.get("GH_TOKEN")
+GITHUB_REPO = os.environ.get("GITHUB_REPO")
 SPACE_URL = os.environ.get("SPACE_URL", "")
 
+# ─────────────────────────────────────────────
+# CHECK ENV VARIABLES
+# ─────────────────────────────────────────────
+required_vars = {
+    "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
+    "TELEGRAM_CHAT_ID": TELEGRAM_CHAT_ID,
+    "GH_TOKEN": GH_TOKEN,
+    "GITHUB_REPO": GITHUB_REPO,
+}
+
+for key, value in required_vars.items():
+    if not value:
+        raise Exception(f"Missing environment variable: {key}")
+
+# ─────────────────────────────────────────────
+# FLASK APP
+# ─────────────────────────────────────────────
 flask_app = Flask(__name__)
 
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # HELPERS
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 def is_valid_link(text: str) -> bool:
     patterns = [
         r'https?://.*douyin\.com.*',
@@ -42,18 +59,22 @@ def is_valid_link(text: str) -> bool:
         r'https?://v\.douyin\.com.*',
         r'https?://www\.iesdouyin\.com.*',
     ]
-    return any(re.search(p, text))
+
+    return any(re.search(p, text) for p in patterns)
 
 
 def extract_link(text: str) -> str:
     match = re.search(r'https?://[^\s]+', text)
-    return match.group(0) if match else text.strip()
+
+    if match:
+        return match.group(0)
+
+    return text.strip()
 
 
-def get_download_url(url: str) -> tuple:
+def get_download_url(url: str):
     """
     Extract direct video URL using yt-dlp
-    Returns (video_url, title)
     """
 
     try:
@@ -67,39 +88,47 @@ def get_download_url(url: str) -> tuple:
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+
             info = ydl.extract_info(url, download=False)
 
             title = info.get("title", "Chinese Video")
 
-            video_url = (
-                info.get("url")
-                or info.get("play_url")
-            )
+            video_url = info.get("url")
 
             if not video_url:
                 formats = info.get("formats", [])
 
-                for f in reversed(formats):
-                    if f.get("url"):
-                        video_url = f["url"]
+                for fmt in reversed(formats):
+
+                    if fmt.get("url"):
+                        video_url = fmt["url"]
                         break
 
-            logger.info(f"Extracted title: {title}")
-            logger.info(f"Extracted video URL successfully")
+            if not video_url:
+                return None, None
+
+            logger.info(f"Title: {title}")
+            logger.info("Video URL extracted successfully")
 
             return video_url, title
 
     except Exception as e:
-        logger.error(f"yt-dlp extraction error: {e}")
+        logger.error(f"yt-dlp error: {e}")
+
         return None, None
 
 
-def trigger_github(video_url: str, title: str) -> bool:
-    try:
-        url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/process.yml/dispatches"
+def trigger_github(video_url: str, title: str):
 
-        resp = requests.post(
-            url,
+    try:
+
+        api_url = (
+            f"https://api.github.com/repos/"
+            f"{GITHUB_REPO}/actions/workflows/process.yml/dispatches"
+        )
+
+        response = requests.post(
+            api_url,
             headers={
                 "Authorization": f"Bearer {GH_TOKEN}",
                 "Accept": "application/vnd.github+json"
@@ -114,114 +143,124 @@ def trigger_github(video_url: str, title: str) -> bool:
             timeout=20
         )
 
-        logger.info(f"GitHub trigger status: {resp.status_code}")
-        logger.info(resp.text)
+        logger.info(f"GitHub API status: {response.status_code}")
+        logger.info(response.text)
 
-        return resp.status_code == 204
+        return response.status_code == 204
 
     except Exception as e:
         logger.error(f"GitHub trigger error: {e}")
+
         return False
 
-
-# ─────────────────────────────────────────────────────────────
-# COMMANDS
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# TELEGRAM COMMANDS
+# ─────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     await update.message.reply_text(
-        "🎬 *Chinese Shorts Bot*\n\n"
-        "Send me a Douyin or TikTok link and I'll:\n"
-        "✅ Download the video\n"
-        "✅ Process it automatically\n"
-        "✅ Send it back ready to post\n\n"
-        "🚀 Paste a link to begin!",
-        parse_mode="Markdown"
+        "🎬 Chinese Shorts Bot\n\n"
+        "Send a Douyin or TikTok link.\n\n"
+        "I'll:\n"
+        "✅ Extract the video\n"
+        "✅ Process it\n"
+        "✅ Send it back automatically\n\n"
+        "🚀 Paste a link to begin!"
     )
 
 
-# ─────────────────────────────────────────────────────────────
-# MESSAGE HANDLER
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# MAIN MESSAGE HANDLER
+# ─────────────────────────────────────────────
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    if str(update.message.chat_id) != TELEGRAM_CHAT_ID:
-        return
-
-    text = update.message.text or ""
-
-    if not is_valid_link(text):
-        await update.message.reply_text(
-            "❌ Please send a valid Douyin/TikTok link.\n\n"
-            "Example:\n"
-            "`https://v.douyin.com/xxxxx/`",
-            parse_mode="Markdown"
-        )
-        return
-
-    msg = await update.message.reply_text(
-        "🔍 Reading video info... ⏳"
-    )
-
     try:
+
+        if str(update.message.chat_id) != str(TELEGRAM_CHAT_ID):
+            return
+
+        text = update.message.text or ""
+
+        if not is_valid_link(text):
+
+            await update.message.reply_text(
+                "❌ Invalid link.\n\n"
+                "Example:\n"
+                "https://v.douyin.com/xxxxx/"
+            )
+
+            return
+
+        msg = await update.message.reply_text(
+            "🔍 Reading video info..."
+        )
+
         link = extract_link(text)
 
         logger.info(f"Received link: {link}")
 
         await msg.edit_text(
-            "⬇️ Extracting download URL... ⏳"
+            "⬇️ Extracting direct video URL..."
         )
 
         video_url, title = get_download_url(link)
 
         if not video_url:
+
             await msg.edit_text(
-                "❌ Could not get download URL!\n\n"
-                "Try:\n"
-                "• Make sure video is public\n"
-                "• Copy full share link from app\n"
-                "• Try again later"
+                "❌ Could not extract video.\n\n"
+                "Possible reasons:\n"
+                "• Video is private\n"
+                "• Douyin blocked extraction\n"
+                "• Invalid share link\n"
+                "• Temporary failure\n\n"
+                "Try another link."
             )
+
             return
 
         await msg.edit_text(
             f"🚀 Processing started!\n\n"
-            f"📹 *{title[:60]}*",
-            parse_mode="Markdown"
+            f"📹 {title[:70]}"
         )
 
         success = trigger_github(video_url, title)
 
         if success:
+
             await msg.edit_text(
-                "✅ *Processing Started Successfully!*\n\n"
-                f"📹 *{title[:60]}*\n\n"
-                "⏱ Usually takes 2-5 minutes.\n"
-                "📱 Video will arrive automatically.\n\n"
-                "☕ Sit tight bhai",
-                parse_mode="Markdown"
+                "✅ Processing started successfully!\n\n"
+                f"📹 {title[:70]}\n\n"
+                "⏱ Processing time: 2-5 mins"
             )
+
         else:
+
             await msg.edit_text(
-                "❌ Failed to trigger GitHub workflow!"
+                "❌ Failed to trigger GitHub workflow."
             )
 
     except Exception as e:
+
         logger.error(f"Handler error: {e}")
 
-        await msg.edit_text(
-            f"❌ Error:\n`{str(e)[:300]}`",
-            parse_mode="Markdown"
-        )
+        try:
+            await update.message.reply_text(
+                f"❌ Error:\n{str(e)[:300]}"
+            )
+        except:
+            pass
 
-
-# ─────────────────────────────────────────────────────────────
-# TELEGRAM APP
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# TELEGRAM APPLICATION
+# ─────────────────────────────────────────────
 ptb_app = Application.builder().token(
     TELEGRAM_BOT_TOKEN
 ).build()
 
-ptb_app.add_handler(CommandHandler("start", start))
+ptb_app.add_handler(
+    CommandHandler("start", start)
+)
 
 ptb_app.add_handler(
     MessageHandler(
@@ -230,60 +269,77 @@ ptb_app.add_handler(
     )
 )
 
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # FLASK ROUTES
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 @flask_app.route("/", methods=["GET"])
-def index():
-    return "🎬 Chinese Shorts Bot is running!", 200
+def home():
+    return "Chinese Shorts Bot Running", 200
 
 
 @flask_app.route("/webhook", methods=["POST"])
 def webhook():
 
-    data = flask_request.get_json(force=True)
+    try:
 
-    update = Update.de_json(data, ptb_app.bot)
+        data = flask_request.get_json(force=True)
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+        update = Update.de_json(data, ptb_app.bot)
 
-    loop.run_until_complete(ptb_app.initialize())
-    loop.run_until_complete(ptb_app.process_update(update))
+        loop = asyncio.new_event_loop()
 
-    return "ok", 200
+        asyncio.set_event_loop(loop)
 
+        loop.run_until_complete(
+            ptb_app.initialize()
+        )
 
-# ─────────────────────────────────────────────────────────────
-# WEBHOOK SETUP
-# ─────────────────────────────────────────────────────────────
+        loop.run_until_complete(
+            ptb_app.process_update(update)
+        )
+
+        return "ok", 200
+
+    except Exception as e:
+
+        logger.error(f"Webhook error: {e}")
+
+        return "error", 500
+
+# ─────────────────────────────────────────────
+# SET TELEGRAM WEBHOOK
+# ─────────────────────────────────────────────
 def setup_webhook():
 
     if not SPACE_URL:
-        logger.warning("SPACE_URL not set!")
+
+        logger.warning("SPACE_URL not set")
+
         return
 
     webhook_url = f"{SPACE_URL}/webhook"
 
     try:
-        resp = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook",
+
+        response = requests.post(
+            f"https://api.telegram.org/bot"
+            f"{TELEGRAM_BOT_TOKEN}/setWebhook",
             json={
                 "url": webhook_url,
                 "drop_pending_updates": True
             },
-            timeout=15
+            timeout=20
         )
 
-        logger.info(f"Webhook response: {resp.json()}")
+        logger.info(response.text)
 
     except Exception as e:
-        logger.error(f"Webhook setup error: {e}")
 
+        logger.error(f"Webhook setup failed: {e}")
 
-# ─────────────────────────────────────────────────────────────
-# START SERVER
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# START APP
+# ─────────────────────────────────────────────
 if __name__ == "__main__":
 
     setup_webhook()
@@ -294,4 +350,4 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=port,
         debug=False
-            )
+)
