@@ -6,6 +6,10 @@ on:
       video_url:
         description: "Direct video download URL"
         required: true
+      title:
+        description: "Video title"
+        required: false
+        default: "Chinese Video"
 
 jobs:
   process:
@@ -30,12 +34,12 @@ jobs:
           ffmpeg -version
 
       - name: 📦 Install dependencies
-        run: |
-          pip install requests
+        run: pip install requests
 
       - name: 🚀 Process Video
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           VIDEO_URL:          ${{ inputs.video_url }}
+          VIDEO_TITLE:        ${{ inputs.title }}
         run: python process.py
