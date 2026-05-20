@@ -14,7 +14,7 @@ GITHUB_REPO = "your-username/your-repo"  # Change this!
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 async def handle_video_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Download Douyin video, trigger processing, return result"""
+    """Download Douyin video using TikTok proxy API"""
     
     if not context.args:
         await update.message.reply_text("Usage: /convert https://douyin.com/...")
@@ -26,35 +26,73 @@ async def handle_video_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Downloading video...")
     
     try:
-        # Step 1: Download with yt-dlp to temp file
-        temp_file = f"/tmp/douyin_{user_id}_{int(time.time())}.mp4"
+        # Extract video ID from Douyin URL
+        video_id = url.split('/')[-1] if '/' in url else url
         
-        result = subprocess.run([
-            'yt-dlp',
-            '-f', 'best[ext=mp4]',
-            '-o', temp_file,
-            '--quiet',
-            '--no-warnings',
-            url
-        ], timeout=120, capture_output=True, text=True)
+        # Use douyin-api proxy (maintains cookies)
+        api_url = f"https://api.douyin.wtf/video/download?url={url}"
         
-        if result.returncode != 0 or not os.path.exists(temp_file):
-            logger.error(f"Download failed: {result.stderr}")
+        response = requests.get(api_url, timeout=30)
+        
+        if response.status_code != 200:
             await update.message.reply_text(
-                f"❌ Download failed. Douyin might be blocking this link.\n\n"
-                f"Error: {result.stderr[:150]}"
+                "❌ Download service temporarily unavailable. Try again in 1 min."
             )
             return
+        
+        data = response.json()
+        
+        if not data.get('success') or not data.get('video_url'):
+            await update.message.reply_text(
+                "❌ Could not download this video. Link might be invalid or expired."
+            )
+            return
+        
+        # Download video from proxy
+        video_response = requests.get(data['video_url'], timeout=60, stream=True)
+        
+        temp_file = f"/tmp/douyin_{user_id}_{int(time.time())}.mp4"
+        
+        with open(temp_file, 'wb') as f:
+            for chunk in video_response.iter_content(chunk_size=1024*1024):
+                f.write(chunk)
         
         file_size_mb = os.path.getsize(temp_file) / (1024 * 1024)
         logger.info(f"Downloaded: {file_size_mb:.1f}MB")
         
         if file_size_mb > 100:
             os.remove(temp_file)
-            await update.message.reply_text(
-                f"❌ Video too large ({file_size_mb:.1f}MB). Max 100MB."
-            )
+            await update.message.reply_text(f"❌ Video too large ({file_size_mb:.1f}MB). Max 100MB.")
             return
+        
+        # Upload to Telegram
+        await update.message.reply_text("📤 Uploading for processing...")
+        
+        with open(temp_file, 'rb') as f:
+            sent_msg = await update.effective_chat.send_video(
+                f,
+                caption="Processing...",
+                supports_streaming=True
+            )
+        
+        file_id = sent_msg.video.file_id
+        
+        # Trigger GitHub Actions
+        await update.message.reply_text("⚙️ Processing to Shorts format...")
+        
+        trigger_ok = await trigger_github_actions(file_id, user_id, update.effective_chat.id)
+        
+        if not trigger_ok:
+            await update.message.reply_text("❌ Failed to trigger processing. Try again.")
+            os.remove(temp_file)
+            return
+        
+        os.remove(temp_file)
+        logger.info("Cleanup done")
+        
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:150]}")
         
         # Step 2: Upload to Telegram (to get file_id for processing)
         await update.message.reply_text("📤 Uploading for processing...")
