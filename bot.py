@@ -1,12 +1,17 @@
 import os
 import subprocess
 import time
+import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 import requests
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-GITHUB_REPO = "your-username/your-repo"
+GITHUB_REPO = "your-username/your-repo"  # Change this!
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 async def handle_video_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Download Douyin video, trigger processing, return result"""
@@ -34,6 +39,7 @@ async def handle_video_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ], timeout=120, capture_output=True, text=True)
         
         if result.returncode != 0 or not os.path.exists(temp_file):
+            logger.error(f"Download failed: {result.stderr}")
             await update.message.reply_text(
                 f"❌ Download failed. Douyin might be blocking this link.\n\n"
                 f"Error: {result.stderr[:150]}"
@@ -41,6 +47,7 @@ async def handle_video_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         file_size_mb = os.path.getsize(temp_file) / (1024 * 1024)
+        logger.info(f"Downloaded: {file_size_mb:.1f}MB")
         
         if file_size_mb > 100:
             os.remove(temp_file)
@@ -60,29 +67,34 @@ async def handle_video_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         
         file_id = sent_msg.video.file_id
+        logger.info(f"Got file_id: {file_id}")
         
         # Step 3: Trigger GitHub Actions
         await update.message.reply_text("⚙️ Processing to Shorts format...")
         
-        trigger_response = await trigger_github_actions(
+        trigger_ok = await trigger_github_actions(
             file_id=file_id,
             user_id=user_id,
             chat_id=update.effective_chat.id
         )
         
-        if not trigger_response:
+        if not trigger_ok:
             await update.message.reply_text(
                 "❌ Failed to trigger processing. Try again."
             )
+            os.remove(temp_file)
+            return
         
         # Step 4: Cleanup original file
         os.remove(temp_file)
+        logger.info("Cleanup done")
         
     except subprocess.TimeoutExpired:
         await update.message.reply_text(
             "⏱️ Download timed out (video too large or slow connection)"
         )
     except Exception as e:
+        logger.error(f"Exception: {e}")
         await update.message.reply_text(f"❌ Error: {str(e)[:150]}")
 
 
@@ -107,9 +119,10 @@ async def trigger_github_actions(file_id: str, user_id: int, chat_id: int) -> bo
     
     try:
         response = requests.post(url, json=payload, headers=headers, timeout=10)
+        logger.info(f"GitHub trigger response: {response.status_code}")
         return response.status_code == 204
     except Exception as e:
-        print(f"GitHub trigger error: {e}")
+        logger.error(f"GitHub trigger error: {e}")
         return False
 
 
@@ -122,21 +135,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def main():
-    app = Application.builder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
+def main():
+    """Start the bot using polling (simple, no webhook needed)"""
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("convert", handle_video_link))
     
-    # Webhook for Render
-    await app.run_webhook(
-        listen="0.0.0.0",
-        port=int(os.getenv("PORT", 8080)),
-        url_path="telegram",
-        webhook_url=f"{os.getenv('WEBHOOK_URL')}/telegram"
-    )
+    logger.info("Bot starting...")
+    app.run_polling()
 
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
