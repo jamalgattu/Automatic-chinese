@@ -1,40 +1,37 @@
-name: 🎬 Process Video
+name: Process Video to Shorts Format
 
 on:
-  workflow_dispatch:
-    inputs:
-      share_url:
-        description: "Douyin/TikTok share URL"
-        required: true
+  repository_dispatch:
+    types: [process_video]
 
 jobs:
   process:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-
+    
     steps:
-      - name: 📥 Checkout repo
-        uses: actions/checkout@v4
-
-      - name: 🐍 Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.11"
-
-      - name: 🎞️ Install FFmpeg
+          python-version: '3.11'
+      
+      - name: Install dependencies
         run: |
-          wget -q https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
-          tar -xf ffmpeg-master-latest-linux64-gpl.tar.xz
-          sudo mv ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/
-          sudo mv ffmpeg-master-latest-linux64-gpl/bin/ffprobe /usr/local/bin/
-          ffmpeg -version
-
-      - name: 📦 Install dependencies
-        run: pip install requests yt-dlp
-
-      - name: 🚀 Process Video
+          pip install python-telegram-bot requests
+          apt-get update && apt-get install -y ffmpeg
+      
+      - name: Download and process video
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
-          SHARE_URL:          ${{ inputs.share_url }}
-        run: python process.py
+          FILE_ID: ${{ github.event.client_payload.file_id }}
+          USER_ID: ${{ github.event.client_payload.user_id }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+        run: |
+          python process.py
+      
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f /tmp/douyin_*.mp4
+          rm -f /tmp/processed_*.mp4
