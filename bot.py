@@ -161,7 +161,7 @@ def main():
     app.add_handler(CommandHandler("convert", handle_video_link))
     
     logger.info("Bot starting...")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
