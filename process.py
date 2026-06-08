@@ -124,13 +124,15 @@ def convert_to_reels(video_path):
         "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
         "crop=1080:1920,boxblur=20:5[bg];"
         "[0:v]scale=1080:-2[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2[v]"
     )
 
     r = subprocess.run([
         "ffmpeg", "-y",
         "-i", str(video_path),
-        "-vf", vf_filter,
+        "-filter_complex", vf_filter,
+        "-map", "[v]",
+        "-map", "0:a?",
         "-c:v", "libx264", "-preset", "fast", "-crf", "23",
         "-c:a", "aac", "-b:a", "128k",
         "-t", "59",
