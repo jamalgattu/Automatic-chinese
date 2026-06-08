@@ -4,16 +4,14 @@ WORKDIR /app
 
 COPY . /app
 
-RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
-
 RUN pip install --upgrade pip
 
 RUN pip install \
     flask \
     requests \
     python-telegram-bot \
-    yt-dlp
+    gunicorn
 
 EXPOSE 10000
 
-CMD ["python", "bot.py"]
+CMD ["gunicorn", "--bind", "0.0.0.0:10000", "--workers", "1", "--timeout", "120", "bot:flask_app"]
