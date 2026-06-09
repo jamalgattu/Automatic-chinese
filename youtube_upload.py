@@ -13,7 +13,6 @@ TELEGRAM_CHAT_ID      = os.environ["TELEGRAM_CHAT_ID"]
 YOUTUBE_CLIENT_ID     = os.environ["YOUTUBE_CLIENT_ID"]
 YOUTUBE_CLIENT_SECRET = os.environ["YOUTUBE_CLIENT_SECRET"]
 YOUTUBE_REFRESH_TOKEN = os.environ["YOUTUBE_REFRESH_TOKEN"]
-VIDEO_ID              = os.environ["VIDEO_ID"]
 
 WORK_DIR = Path("workdir")
 
@@ -84,14 +83,10 @@ def upload_to_youtube(youtube, video_path):
     return video_url
 
 def main():
-    # Find the processed video
-    videos = list(WORK_DIR.glob(f"final_{VIDEO_ID}*.mp4"))
-    if not videos:
-        # Try downloading from GitHub Actions artifacts
+    video_path = WORK_DIR / "final.mp4"
+    if not video_path.exists():
         notify("❌ Could not find processed video to upload.")
         return
-
-    video_path = videos[0]
 
     try:
         notify("📤 Uploading to YouTube... This takes ~1 minute!")
