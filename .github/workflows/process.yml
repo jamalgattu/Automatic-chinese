@@ -30,7 +30,7 @@ jobs:
           ffmpeg -version
 
       - name: 📦 Install dependencies
-        run: pip install requests google-auth google-api-python-client
+        run: pip install requests
 
       - name: 🚀 Process Video
         env:
@@ -38,12 +38,3 @@ jobs:
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           SHARE_URL:          ${{ inputs.share_url }}
         run: python process.py
-
-      - name: 📤 Upload to YouTube
-        env:
-          TELEGRAM_BOT_TOKEN:    ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:      ${{ secrets.TELEGRAM_CHAT_ID }}
-          YOUTUBE_CLIENT_ID:     ${{ secrets.YOUTUBE_CLIENT_ID }}
-          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
-          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
-        run: python youtube_upload.py
