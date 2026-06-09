@@ -5,11 +5,12 @@ import re
 import asyncio
 
 from flask import Flask, request as flask_request
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters
 )
@@ -24,24 +25,30 @@ logger = logging.getLogger(__name__)
 # ENV VARIABLES
 # ─────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-GH_TOKEN = os.environ.get("GH_TOKEN")
-GITHUB_REPO = os.environ.get("GITHUB_REPO")
-SPACE_URL = os.environ.get("SPACE_URL", "")
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID")
+GH_TOKEN           = os.environ.get("GH_TOKEN")
+GITHUB_REPO        = os.environ.get("GITHUB_REPO")
+SPACE_URL          = os.environ.get("SPACE_URL", "")
 
 # ─────────────────────────────────────────────
 # CHECK ENV VARIABLES
 # ─────────────────────────────────────────────
 required_vars = {
     "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
-    "TELEGRAM_CHAT_ID": TELEGRAM_CHAT_ID,
-    "GH_TOKEN": GH_TOKEN,
-    "GITHUB_REPO": GITHUB_REPO,
+    "TELEGRAM_CHAT_ID":   TELEGRAM_CHAT_ID,
+    "GH_TOKEN":           GH_TOKEN,
+    "GITHUB_REPO":        GITHUB_REPO,
 }
 
 for key, value in required_vars.items():
     if not value:
         logger.error(f"Missing environment variable: {key}")
+
+# ─────────────────────────────────────────────
+# STATE: tracks chats awaiting YouTube details
+# { chat_id: file_id }
+# ─────────────────────────────────────────────
+pending_youtube = {}
 
 # ─────────────────────────────────────────────
 # FLASK APP
@@ -58,28 +65,45 @@ def is_valid_link(text: str) -> bool:
         r'https?://v\.douyin\.com.*',
         r'https?://www\.iesdouyin\.com.*',
     ]
-
     return any(re.search(p, text) for p in patterns)
 
 
 def extract_link(text: str) -> str:
     match = re.search(r'https?://[^\s]+', text)
-
-    if match:
-        return match.group(0)
-
-    return text.strip()
+    return match.group(0) if match else text.strip()
 
 
 def trigger_github(share_url: str):
-
     try:
-
         api_url = (
             f"https://api.github.com/repos/"
             f"{GITHUB_REPO}/actions/workflows/process.yml/dispatches"
         )
+        response = requests.post(
+            api_url,
+            headers={
+                "Authorization": f"Bearer {GH_TOKEN}",
+                "Accept": "application/vnd.github+json"
+            },
+            json={
+                "ref": "main",
+                "inputs": {"share_url": share_url}
+            },
+            timeout=20
+        )
+        logger.info(f"GitHub API status: {response.status_code}")
+        return response.status_code == 204
+    except Exception as e:
+        logger.error(f"GitHub trigger error: {e}")
+        return False
 
+
+def trigger_youtube_upload(file_id: str, title: str, description: str):
+    try:
+        api_url = (
+            f"https://api.github.com/repos/"
+            f"{GITHUB_REPO}/actions/workflows/upload.yml/dispatches"
+        )
         response = requests.post(
             api_url,
             headers={
@@ -89,113 +113,147 @@ def trigger_github(share_url: str):
             json={
                 "ref": "main",
                 "inputs": {
-                    "share_url": share_url,
+                    "file_id":     file_id,
+                    "title":       title,
+                    "description": description,
                 }
             },
             timeout=20
         )
-
-        logger.info(f"GitHub API status: {response.status_code}")
-        logger.info(response.text)
-
+        logger.info(f"Upload workflow status: {response.status_code}")
         return response.status_code == 204
-
     except Exception as e:
-        logger.error(f"GitHub trigger error: {e}")
-
+        logger.error(f"Upload trigger error: {e}")
         return False
 
 # ─────────────────────────────────────────────
 # TELEGRAM COMMANDS
 # ─────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     await update.message.reply_text(
         "🎬 Chinese Shorts Bot\n\n"
         "Send a Douyin or TikTok link.\n\n"
         "I'll:\n"
         "✅ Extract the video\n"
-        "✅ Process it\n"
+        "✅ Process it to 9:16 format\n"
         "✅ Send it back automatically\n\n"
         "🚀 Paste a link to begin!"
     )
 
+# ─────────────────────────────────────────────
+# CALLBACK: YouTube Shorts button tapped
+# ─────────────────────────────────────────────
+async def youtube_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data != "post_youtube":
+        return
+
+    # Get the file_id from the video message the button was attached to
+    video = query.message.video
+    if not video:
+        await query.message.reply_text("❌ Could not find the video. Please try again.")
+        return
+
+    file_id = video.file_id
+    chat_id = str(query.message.chat_id)
+
+    # Store state: waiting for title/description from this chat
+    pending_youtube[chat_id] = file_id
+
+    await query.message.reply_text(
+        "📝 <b>YouTube Upload Details</b>\n\n"
+        "Reply with your title and description in this format:\n\n"
+        "<code>Title | Description</code>\n\n"
+        "Example:\n"
+        "<code>Viral Chinese dance 🔥 | Funny Chinese video with English captions #Shorts</code>",
+        parse_mode="HTML"
+    )
 
 # ─────────────────────────────────────────────
 # MAIN MESSAGE HANDLER
 # ─────────────────────────────────────────────
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     try:
+        chat_id = str(update.message.chat_id)
 
-        if str(update.message.chat_id) != str(TELEGRAM_CHAT_ID):
+        if chat_id != str(TELEGRAM_CHAT_ID):
             return
 
         text = update.message.text or ""
 
-        if not is_valid_link(text):
+        # ── YouTube upload flow ──────────────────
+        if chat_id in pending_youtube:
+            if "|" not in text:
+                await update.message.reply_text(
+                    "⚠️ Please use the format:\n"
+                    "<code>Title | Description</code>",
+                    parse_mode="HTML"
+                )
+                return
 
+            parts       = text.split("|", 1)
+            title       = parts[0].strip()
+            description = parts[1].strip()
+            file_id     = pending_youtube.pop(chat_id)
+
+            msg = await update.message.reply_text("📤 Starting YouTube upload...")
+
+            success = trigger_youtube_upload(file_id, title, description)
+
+            if success:
+                await msg.edit_text(
+                    "✅ <b>Upload started!</b>\n\n"
+                    f"🎬 <b>Title:</b> {title}\n"
+                    f"📝 <b>Description:</b> {description[:80]}\n\n"
+                    "⏱ Takes ~1-2 minutes. I'll send the YouTube link when it's done!",
+                    parse_mode="HTML"
+                )
+            else:
+                await msg.edit_text("❌ Failed to start upload. Check GitHub secrets.")
+            return
+
+        # ── Douyin/TikTok link flow ──────────────
+        if not is_valid_link(text):
             await update.message.reply_text(
                 "❌ Invalid link.\n\n"
-                "Example:\n"
-                "https://v.douyin.com/xxxxx/"
+                "Example:\nhttps://v.douyin.com/xxxxx/"
             )
-
             return
 
         link = extract_link(text)
-
         logger.info(f"Received link: {link}")
 
-        msg = await update.message.reply_text(
-            "🚀 Sending to processor..."
-        )
+        msg = await update.message.reply_text("🚀 Sending to processor...")
 
         success = trigger_github(link)
 
         if success:
-
             await msg.edit_text(
                 "✅ Processing started!\n\n"
                 f"🔗 {link[:70]}\n\n"
                 "⏱ Extracting + processing: 2-5 mins\n"
                 "You'll receive the video when it's ready."
             )
-
         else:
-
-            await msg.edit_text(
-                "❌ Failed to trigger GitHub workflow."
-            )
+            await msg.edit_text("❌ Failed to trigger GitHub workflow.")
 
     except Exception as e:
-
         logger.error(f"Handler error: {e}")
-
         try:
-            await update.message.reply_text(
-                f"❌ Error:\n{str(e)[:300]}"
-            )
+            await update.message.reply_text(f"❌ Error:\n{str(e)[:300]}")
         except:
             pass
 
 # ─────────────────────────────────────────────
 # TELEGRAM APPLICATION
 # ─────────────────────────────────────────────
-ptb_app = Application.builder().token(
-    TELEGRAM_BOT_TOKEN
-).build()
+ptb_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-ptb_app.add_handler(
-    CommandHandler("start", start)
-)
-
-ptb_app.add_handler(
-    MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
-        handle_message
-    )
-)
+ptb_app.add_handler(CommandHandler("start", start))
+ptb_app.add_handler(CallbackQueryHandler(youtube_callback))
+ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 # ─────────────────────────────────────────────
 # FLASK ROUTES
@@ -207,62 +265,37 @@ def home():
 
 @flask_app.route("/webhook", methods=["POST"])
 def webhook():
-
     try:
-
-        data = flask_request.get_json(force=True)
-
+        data   = flask_request.get_json(force=True)
         update = Update.de_json(data, ptb_app.bot)
 
         loop = asyncio.new_event_loop()
-
         asyncio.set_event_loop(loop)
-
-        loop.run_until_complete(
-            ptb_app.initialize()
-        )
-
-        loop.run_until_complete(
-            ptb_app.process_update(update)
-        )
+        loop.run_until_complete(ptb_app.initialize())
+        loop.run_until_complete(ptb_app.process_update(update))
 
         return "ok", 200
-
     except Exception as e:
-
         logger.error(f"Webhook error: {e}")
-
         return "error", 500
 
 # ─────────────────────────────────────────────
 # SET TELEGRAM WEBHOOK
 # ─────────────────────────────────────────────
 def setup_webhook():
-
     if not SPACE_URL:
-
-        logger.warning("SPACE_URL not set")
-
+        logger.warning("SPACE_URL not set — webhook not registered")
         return
 
     webhook_url = f"{SPACE_URL}/webhook"
-
     try:
-
         response = requests.post(
-            f"https://api.telegram.org/bot"
-            f"{TELEGRAM_BOT_TOKEN}/setWebhook",
-            json={
-                "url": webhook_url,
-                "drop_pending_updates": True
-            },
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook",
+            json={"url": webhook_url, "drop_pending_updates": True},
             timeout=20
         )
-
         logger.info(response.text)
-
     except Exception as e:
-
         logger.error(f"Webhook setup failed: {e}")
 
 # ─────────────────────────────────────────────
@@ -271,11 +304,5 @@ def setup_webhook():
 setup_webhook()
 
 if __name__ == "__main__":
-
     port = int(os.environ.get("PORT", 10000))
-
-    flask_app.run(
-        host="0.0.0.0",
-        port=port,
-        debug=False
-)
+    flask_app.run(host="0.0.0.0", port=port, debug=False)
