@@ -1,0 +1,43 @@
+name: 📤 Upload to YouTube
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_id:
+        description: "Telegram file_id of the processed video"
+        required: true
+      title:
+        description: "YouTube video title"
+        required: true
+      description:
+        description: "YouTube video description"
+        required: true
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 📥 Checkout repo
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 📦 Install dependencies
+        run: pip install requests google-auth google-api-python-client
+
+      - name: 📤 Upload to YouTube
+        env:
+          TELEGRAM_BOT_TOKEN:    ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:      ${{ secrets.TELEGRAM_CHAT_ID }}
+          YOUTUBE_CLIENT_ID:     ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          TELEGRAM_FILE_ID:      ${{ inputs.file_id }}
+          YOUTUBE_TITLE:         ${{ inputs.title }}
+          YOUTUBE_DESCRIPTION:   ${{ inputs.description }}
+        run: python youtube_upload.py
