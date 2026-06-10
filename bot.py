@@ -45,10 +45,11 @@ for key, value in required_vars.items():
         logger.error(f"Missing environment variable: {key}")
 
 # ─────────────────────────────────────────────
-# STATE: tracks chats awaiting YouTube details
+# STATE: tracks chats awaiting upload details
 # { chat_id: file_id }
 # ─────────────────────────────────────────────
-pending_youtube = {}
+pending_youtube   = {}
+pending_instagram = {}
 
 # ─────────────────────────────────────────────
 # FLASK APP
@@ -98,6 +99,34 @@ def trigger_github(share_url: str):
         return False
 
 
+def trigger_instagram_upload(file_id: str, caption: str):
+    try:
+        api_url = (
+            f"https://api.github.com/repos/"
+            f"{GITHUB_REPO}/actions/workflows/instagram.yml/dispatches"
+        )
+        response = requests.post(
+            api_url,
+            headers={
+                "Authorization": f"Bearer {GH_TOKEN}",
+                "Accept": "application/vnd.github+json"
+            },
+            json={
+                "ref": "main",
+                "inputs": {
+                    "file_id": file_id,
+                    "caption": caption,
+                }
+            },
+            timeout=20
+        )
+        logger.info(f"Instagram workflow status: {response.status_code}")
+        return response.status_code == 204
+    except Exception as e:
+        logger.error(f"Instagram trigger error: {e}")
+        return False
+
+
 def trigger_youtube_upload(file_id: str, title: str, description: str):
     try:
         api_url = (
@@ -141,16 +170,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ─────────────────────────────────────────────
-# CALLBACK: YouTube Shorts button tapped
+# CALLBACKS: upload button taps
 # ─────────────────────────────────────────────
-async def youtube_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
+async def upload_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query   = update.callback_query
     await query.answer()
 
-    if query.data != "post_youtube":
-        return
-
-    # Get the file_id from the video message the button was attached to
     video = query.message.video
     if not video:
         await query.message.reply_text("❌ Could not find the video. Please try again.")
@@ -159,17 +184,26 @@ async def youtube_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_id = video.file_id
     chat_id = str(query.message.chat_id)
 
-    # Store state: waiting for title/description from this chat
-    pending_youtube[chat_id] = file_id
+    if query.data == "post_youtube":
+        pending_youtube[chat_id] = file_id
+        await query.message.reply_text(
+            "📝 <b>YouTube Upload Details</b>\n\n"
+            "Reply with your title and description:\n\n"
+            "<code>Title | Description</code>\n\n"
+            "<i>Example:</i>\n"
+            "<code>Viral Chinese dance 🔥 | Funny clip with captions #Shorts</code>",
+            parse_mode="HTML"
+        )
 
-    await query.message.reply_text(
-        "📝 <b>YouTube Upload Details</b>\n\n"
-        "Reply with your title and description in this format:\n\n"
-        "<code>Title | Description</code>\n\n"
-        "Example:\n"
-        "<code>Viral Chinese dance 🔥 | Funny Chinese video with English captions #Shorts</code>",
-        parse_mode="HTML"
-    )
+    elif query.data == "post_instagram":
+        pending_instagram[chat_id] = file_id
+        await query.message.reply_text(
+            "📸 <b>Instagram Reel Caption</b>\n\n"
+            "Reply with the caption for your Reel:\n\n"
+            "<i>Example:</i>\n"
+            "<code>Viral Chinese dance 🔥 #Shorts #Viral #Chinese #Reels</code>",
+            parse_mode="HTML"
+        )
 
 # ─────────────────────────────────────────────
 # MAIN MESSAGE HANDLER
@@ -182,6 +216,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         text = update.message.text or ""
+
+        # ── Instagram upload flow ────────────────
+        if chat_id in pending_instagram:
+            caption = text.strip()
+            file_id = pending_instagram.pop(chat_id)
+
+            msg = await update.message.reply_text("📸 Starting Instagram upload...")
+
+            success = trigger_instagram_upload(file_id, caption)
+
+            if success:
+                await msg.edit_text(
+                    "✅ <b>Instagram upload started!</b>\n\n"
+                    f"📝 <b>Caption:</b> {caption[:100]}\n\n"
+                    "⏱ Takes ~1-2 minutes. I'll send the Reel link when it's live!",
+                    parse_mode="HTML"
+                )
+            else:
+                await msg.edit_text("❌ Failed to start Instagram upload. Check GitHub secrets.")
+            return
 
         # ── YouTube upload flow ──────────────────
         if chat_id in pending_youtube:
@@ -252,7 +306,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ptb_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
 ptb_app.add_handler(CommandHandler("start", start))
-ptb_app.add_handler(CallbackQueryHandler(youtube_callback))
+ptb_app.add_handler(CallbackQueryHandler(upload_callback))
 ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 # ─────────────────────────────────────────────
