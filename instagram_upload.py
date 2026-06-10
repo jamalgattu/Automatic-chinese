@@ -1,4 +1,5 @@
 import os
+import json
 import requests
 import time
 from pathlib import Path
@@ -8,7 +9,8 @@ TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
 TELEGRAM_FILE_ID   = os.environ["TELEGRAM_FILE_ID"]
 INSTAGRAM_USERNAME = os.environ["INSTAGRAM_USERNAME"]
 INSTAGRAM_PASSWORD = os.environ["INSTAGRAM_PASSWORD"]
-INSTA_CAPTION      = os.environ.get("INSTA_CAPTION", "🔥 #Shorts #Viral #Chinese")
+INSTAGRAM_SESSION  = os.environ.get("INSTAGRAM_SESSION", "")   # preferred
+INSTA_CAPTION      = os.environ.get("INSTA_CAPTION", "#Shorts #Viral #Chinese")
 
 WORK_DIR = Path("workdir")
 WORK_DIR.mkdir(exist_ok=True)
@@ -19,18 +21,18 @@ def notify(msg):
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
             json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"},
-            timeout=10
+            timeout=10,
         )
     except Exception as e:
         print(f"Notify failed: {e}")
 
 
 def download_from_telegram(file_id: str) -> Path:
-    print(f"Getting Telegram file path...")
+    print("Getting Telegram file path...")
     r = requests.get(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile",
         params={"file_id": file_id},
-        timeout=15
+        timeout=15,
     )
     r.raise_for_status()
     file_path    = r.json()["result"]["file_path"]
@@ -49,25 +51,31 @@ def download_from_telegram(file_id: str) -> Path:
     return video_path
 
 
-def upload_to_instagram(video_path: Path, caption: str):
+def login_instagram():
     from instagrapi import Client
 
-    print(f"Logging in as {INSTAGRAM_USERNAME}...")
     cl = Client()
     cl.delay_range = [2, 5]
-    cl.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
+
+    if INSTAGRAM_SESSION:
+        print("Using saved session (no fresh login needed)...")
+        cl.set_settings(json.loads(INSTAGRAM_SESSION))
+        # Reuse session — login() will validate without a new IP-based auth
+        cl.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
+    else:
+        print(f"No session found — fresh login as {INSTAGRAM_USERNAME}...")
+        print("WARNING: This may be blocked if the server IP is blacklisted by Instagram.")
+        cl.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
+
     print("Logged in!")
+    return cl
 
-    time.sleep(3)
 
+def upload_reel(cl, video_path: Path, caption: str) -> str:
     print("Uploading Reel...")
-    media = cl.clip_upload(
-        path=video_path,
-        caption=caption
-    )
-
-    shortcode = media.code
-    url = f"https://www.instagram.com/reel/{shortcode}/"
+    time.sleep(3)
+    media     = cl.clip_upload(path=video_path, caption=caption)
+    url       = f"https://www.instagram.com/reel/{media.code}/"
     print(f"Uploaded! {url}")
     return url
 
@@ -83,7 +91,8 @@ def main():
             "This takes 1-2 minutes..."
         )
 
-        url = upload_to_instagram(video_path, INSTA_CAPTION)
+        cl  = login_instagram()
+        url = upload_reel(cl, video_path, INSTA_CAPTION)
 
         notify(
             f"🎉 <b>Posted to Instagram!</b>\n\n"
@@ -94,7 +103,7 @@ def main():
 
     except Exception as e:
         print(f"Instagram upload failed: {e}")
-        notify(f"❌ Instagram upload failed:\n{str(e)[:200]}")
+        notify(f"❌ Instagram upload failed:\n{str(e)[:300]}")
 
 
 if __name__ == "__main__":
