@@ -273,18 +273,21 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 # ─────────────────────────────────────────────
-# BUILD PTB APPLICATION  (initialised once)
+# BUILD PTB APPLICATION
+# One persistent event loop — never closed.
+# httpx (used by ptb v20+) binds to the loop it
+# was created in; closing it kills all connections.
 # ─────────────────────────────────────────────
+_bot_loop = asyncio.new_event_loop()
+asyncio.set_event_loop(_bot_loop)
+
 ptb_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 ptb_app.add_handler(CommandHandler("start",        cmd_start))
 ptb_app.add_handler(CommandHandler("uploadinsta",  cmd_uploadinsta))
 ptb_app.add_handler(CallbackQueryHandler(on_button))
 ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
 
-# Initialize once at module load (works for both `python bot.py` and gunicorn)
-_loop = asyncio.new_event_loop()
-_loop.run_until_complete(ptb_app.initialize())
-_loop.close()
+_bot_loop.run_until_complete(ptb_app.initialize())
 
 # ─────────────────────────────────────────────
 # FLASK ROUTES
@@ -299,12 +302,7 @@ def webhook():
     try:
         data   = flask_request.get_json(force=True)
         update = Update.de_json(data, ptb_app.bot)
-        # Run update processing in a fresh loop — ptb_app is already initialised
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(ptb_app.process_update(update))
-        finally:
-            loop.close()
+        _bot_loop.run_until_complete(ptb_app.process_update(update))
         return "ok", 200
     except Exception as e:
         logger.error(f"Webhook error: {e}")
