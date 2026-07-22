@@ -171,12 +171,11 @@ def send_to_telegram(video_path, title=""):
     )
 
     keyboard = {
-        "inline_keyboard": [[
-            {"text": "▶️ YouTube Shorts", "callback_data": "post_youtube"},
-            {"text": "📸 Instagram Reels", "callback_data": "post_instagram"},
-        ], [
-            {"text": "📱 Just send me", "callback_data": "just_send"},
-        ]]
+    "inline_keyboard": [[
+        {"text": "📘 Post to Facebook", "callback_data": "post_facebook"},
+    ], [
+        {"text": "📱 Just send me", "callback_data": "just_send"},
+    ]]
     }
 
     with open(video_path, "rb") as f:
