@@ -1,0 +1,38 @@
+name: 📘 Upload to Facebook
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_id:
+        description: "Telegram file_id of the processed video"
+        required: true
+      caption:
+        description: "Facebook post caption"
+        required: true
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: 📥 Checkout repo
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 📦 Install dependencies
+        run: pip install requests
+
+      - name: 📘 Upload to Facebook
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          FB_PAGE_TOKEN:      ${{ secrets.FB_PAGE_TOKEN }}
+          FB_PAGE_ID:         ${{ secrets.FB_PAGE_ID }}
+          TELEGRAM_FILE_ID:   ${{ inputs.file_id }}
+          FB_CAPTION:         ${{ inputs.caption }}
+        run: python facebook_upload.py
